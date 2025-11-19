@@ -1,2 +1,5 @@
 *.db
 .env
+sounds/
+__pycache__/
+videos/
