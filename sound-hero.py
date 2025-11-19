@@ -17,7 +17,7 @@ from dotenv import load_dotenv # type: ignore
 env_path = Path(__file__).resolve().parent / ".env"
 load_dotenv(dotenv_path=env_path)
 TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-MAX_PLAY_DURATION = os.getenv("MAX_PLAY_DURATION")  # Maximum playback duration in seconds
+MAX_PLAY_DURATION = int(os.getenv("MAX_PLAY_DURATION"))  # Maximum playback duration in seconds
 SOUND_FOLDER = "sounds/"  # Folder where MP3 files are stored
 API_URL = os.getenv("API_URL")
 API_JSON_RETURN = {}
