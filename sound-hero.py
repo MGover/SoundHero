@@ -37,11 +37,49 @@ conn.commit()
 
 # youtube stuff
 # Ensure ffmpeg is installed and accessible
-FFMPEG_OPTIONS = os.getenv("FFMPEG_OPTS")
+# Accept `FFMPEG_OPTS` as a JSON-encoded mapping in the env (e.g. '{"options":"-vn"}').
+# If it's missing or invalid, fall back to a safe default mapping.
+_ffmpeg_env = os.getenv("FFMPEG_OPTS")
+try:
+    if _ffmpeg_env:
+        FFMPEG_OPTIONS = _json.loads(_ffmpeg_env)
+        if not isinstance(FFMPEG_OPTIONS, dict):
+            raise ValueError("FFMPEG_OPTS is not a mapping")
+    else:
+        FFMPEG_OPTIONS = {"options": "-vn"}
+except Exception:
+    print("[config] Invalid FFMPEG_OPTS; falling back to default options")
+    FFMPEG_OPTIONS = {"options": "-vn"}
 
 # Options for yt-dlp
-ytdl_format_options = os.getenv("YTDL_FORMAT_OPTS")
-ytdl = youtube_dl.YoutubeDL(ytdl_format_options)
+import json as _json
+
+# Ensure downloaded videos go into the `videos/` folder by default.
+# Allow overriding via the `YTDL_FORMAT_OPTS` environment variable (JSON string).
+default_ytdl_opts = {
+    'format': 'bestaudio/best',
+    'outtmpl': 'videos/%(title)s.%(ext)s',
+    'noplaylist': False,
+    'quiet': True,
+    'ignoreerrors': True,
+    'no_warnings': True,
+    'cachedir': False
+}
+
+_env_opts = os.getenv("YTDL_FORMAT_OPTS")
+if _env_opts:
+    try:
+        parsed = _json.loads(_env_opts)
+        if isinstance(parsed, dict):
+            default_ytdl_opts.update(parsed)
+    except Exception:
+        # If env var isn't valid JSON, ignore and use defaults
+        pass
+
+# Create videos directory if it doesn't exist
+os.makedirs("videos", exist_ok=True)
+
+ytdl = youtube_dl.YoutubeDL(default_ytdl_opts)
 audio_queue = deque()  # Stores queued songs
 
 async def play_next(voice_client):
@@ -79,10 +117,40 @@ class YTDLSource(discord.PCMVolumeTransformer):
     
     @classmethod
     async def get_urls(cls, url, *, loop=None, stream=False):
+        """Return a list of video URLs for the given url (playlist or single video).
+
+        This method does not download files; it extracts metadata only.
+        """
         loop = loop or asyncio.get_event_loop()
-        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(url, download=not stream))
-        for entry in data['entries']:
-            GLOBAL_LIST.append(entry["url"])
+        # Always extract info without downloading to avoid saving entire playlists
+        try:
+            print(f"[YTDL] Extracting info for: {url}")
+            # Put the blocking call in an executor and guard with a timeout so the bot doesn't hang.
+            extract = lambda: ytdl.extract_info(url, download=False)
+            data = await asyncio.wait_for(loop.run_in_executor(None, extract), timeout=30)
+            print(f"[YTDL] Extraction complete for: {url}")
+        except asyncio.TimeoutError:
+            print(f"[YTDL] Timeout extracting info for: {url}")
+            return []
+        except Exception as e:
+            print(f"[YTDL] Error extracting info for {url}: {e}")
+            return []
+
+        entries = []
+        if not data:
+            return entries
+
+        if 'entries' in data and data['entries']:
+            for entry in data['entries']:
+                if not entry:
+                    continue
+                # Prefer full webpage_url if available
+                entries.append(entry.get('webpage_url') or entry.get('url'))
+        else:
+            entries.append(data.get('webpage_url') or data.get('url'))
+
+        print(f"[YTDL] Found {len(entries)} entries for: {url}")
+        return [e for e in entries if e]
 
 def log(data):
     with open("log.txt", "a") as f:
@@ -165,6 +233,9 @@ async def play_sound(vc, sound_name, duration=MAX_PLAY_DURATION):
         print(f"File not found: {file_path}")
 
 async def play_yt_sound(vc, player):
+    if not vc:
+        print("[play_yt_sound] No voice client provided; cannot play.")
+        return
     if vc.is_playing():
         vc.stop()
     vc.play(player, after=lambda e: print(f'Done playing: {player.title}'))
@@ -385,24 +456,111 @@ async def play(interaction: discord.Interaction, url: str):
     
     channel = interaction.user.voice.channel
     voice_client = discord.utils.get(bot.voice_clients, guild=interaction.guild)
-    
-    if 'playlist' in url:
-        await interaction.response.send_message(f'Loading playlist....', ephemeral=False)
+    # Defer the response immediately to avoid the "application did not respond" message
+    # because extracting playlist metadata can take time.
+    try:
+        await interaction.response.defer()
+    except Exception:
+        # If deferring fails (interaction already responded), continue; we'll use followups.
+        pass
+
+    # Determine whether this looks like a playlist URL.
+    is_playlist = ('playlist' in url) or (('list=' in url) and ('watch?v=' not in url))
+
+    if is_playlist:
+        # Use followup because we already deferred.
+        try:
+            await interaction.followup.send('Loading playlist....')
+        except Exception:
+            pass
+
         if not voice_client:
             voice_client = await channel.connect()
 
-        await YTDLSource.get_urls(url)
-        for curr_url in urls:
-            player = await YTDLSource.from_url(curr_url, loop=bot.loop, stream=True)
-            await interaction.followup.send(f'Now playing: {player.title}')
+        print(f"[play] Loading playlist url: {url}")
+
+        try:
+            urls = await YTDLSource.get_urls(url)
+        except Exception as e:
+            print(f"[play] Exception while getting URLs: {e}")
+            try:
+                await interaction.followup.send("Failed to load playlist (error during metadata extraction).", ephemeral=True)
+            except Exception:
+                pass
+            return
+
+        if not urls:
+            try:
+                await interaction.followup.send("No items found in playlist or extraction timed out.", ephemeral=True)
+            except Exception:
+                pass
+            print("[play] No URLs returned from get_urls()")
+            return
+
+        # Stream one video at a time; do not pre-download the entire playlist
+        for idx, curr_url in enumerate(urls, start=1):
+            print(f"[play] Streaming playlist item {idx}/{len(urls)}: {curr_url}")
+            try:
+                player = await YTDLSource.from_url(curr_url, loop=bot.loop, stream=True)
+            except Exception as e:
+                print(f"[play] Failed to create player for {curr_url}: {e}")
+                try:
+                    await interaction.followup.send(f"Skipping item {idx}: failed to load.")
+                except Exception:
+                    pass
+                continue
+
+            # Try to use interaction followup (preferred), but fall back to channel send
+            try:
+                await interaction.followup.send(f'Now playing: {player.title}')
+            except Exception as e:
+                print(f"[play] followup.send failed, falling back to channel.send: {e}")
+                try:
+                    if interaction.channel:
+                        await interaction.channel.send(f'Now playing: {player.title}')
+                except Exception as e2:
+                    print(f"[play] fallback channel.send also failed: {e2}")
+
+            if not voice_client:
+                voice_client = await channel.connect()
+
             await play_yt_sound(voice_client, player)
+
+            # Wait for the track to finish or until MAX_PLAY_DURATION seconds
+            dur = None
+            try:
+                dur = player.data.get('duration') if getattr(player, 'data', None) else None
+            except Exception:
+                dur = None
+            try:
+                wait_sec = min(int(dur), MAX_PLAY_DURATION) if dur else MAX_PLAY_DURATION
+            except Exception:
+                wait_sec = MAX_PLAY_DURATION
+
+            print(f"[play] Waiting {wait_sec}s for current track to finish or reach MAX_PLAY_DURATION")
+            await asyncio.sleep(wait_sec)
+        print("[play] Finished playlist streaming")
         return
 
+    # Single-video flow
     global GLOBAL_LIST 
     GLOBAL_LIST = []
-    player = await YTDLSource.from_url(url, loop=bot.loop, stream=True)
-    await interaction.response.send_message(f'Now playing: {player.title}', ephemeral=False)
-    
+    print(f"[play] Loading single video URL: {url}")
+    try:
+        player = await YTDLSource.from_url(url, loop=bot.loop, stream=True)
+    except Exception as e:
+        print(f"[play] Failed to create player for single URL {url}: {e}")
+        try:
+            await interaction.followup.send("Failed to load video.", ephemeral=True)
+        except Exception:
+            pass
+        return
+
+    try:
+        await interaction.followup.send(f'Now playing: {player.title}')
+    except Exception:
+        pass
+
     if not voice_client:
         voice_client = await channel.connect()
 
