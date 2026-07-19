@@ -12,6 +12,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libffi-dev \
     libssl-dev \
+    libopus0 \
+    libopus-dev \
+    python3-dev \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
