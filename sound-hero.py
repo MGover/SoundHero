@@ -12,19 +12,29 @@ import parser
 from pathlib import Path
 from collections import deque
 from youtubesearchpython import VideosSearch, Suggestions
-from dotenv import load_dotenv # type: ignore
+from dotenv import load_dotenv  # type: ignore
+from config import parse_env_mapping
 
-env_path = Path(__file__).resolve().parent / ".env"
+BASE_DIR = Path(__file__).resolve().parent
+env_path = BASE_DIR / ".env"
 load_dotenv(dotenv_path=env_path)
-TOKEN = os.getenv("DISCORD_BOT_TOKEN")
-MAX_PLAY_DURATION = int(os.getenv("MAX_PLAY_DURATION"))  # Maximum playback duration in seconds
-SOUND_FOLDER = "sounds/"  # Folder where MP3 files are stored
-API_URL = os.getenv("API_URL")
+
+RUNNING_IN_DOCKER = os.getenv("RUNNING_IN_DOCKER", "false").lower() == "true"
+DATA_DIR = Path(os.getenv("SOUNDHERO_DATA_DIR", "/app/data" if RUNNING_IN_DOCKER else str(BASE_DIR))).resolve()
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+SOUND_FOLDER = str(DATA_DIR / "sounds")
+SOUND_FOLDER_PATH = Path(SOUND_FOLDER)
+SOUND_FOLDER_PATH.mkdir(parents=True, exist_ok=True)
+
+TOKEN = os.getenv("DISCORD_BOT_TOKEN", "").strip()
+MAX_PLAY_DURATION = int(os.getenv("MAX_PLAY_DURATION", "3"))  # Maximum playback duration in seconds
+API_URL = os.getenv("API_URL", "https://www.myinstants.com")
 API_JSON_RETURN = {}
 GLOBAL_LIST = []
 
 # Database setup for storing user sound settings
-conn = sqlite3.connect("soundboard_sounds.db")
+DB_PATH = DATA_DIR / "soundboard_sounds.db"
+conn = sqlite3.connect(DB_PATH)
 c = conn.cursor()
 c.execute("""
     CREATE TABLE IF NOT EXISTS sounds (
@@ -37,10 +47,33 @@ conn.commit()
 
 # youtube stuff
 # Ensure ffmpeg is installed and accessible
-FFMPEG_OPTIONS = os.getenv("FFMPEG_OPTS")
+FFMPEG_OPTIONS = parse_env_mapping(
+    "FFMPEG_OPTS",
+    {
+        "options": "-vn",
+        "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+    },
+)
 
 # Options for yt-dlp
-ytdl_format_options = os.getenv("YTDL_FORMAT_OPTS")
+ytdl_format_options = parse_env_mapping(
+    "YTDL_OPTS",
+    {
+        "format": "bestaudio/best",
+        "outtmpl": "%(extractor)s-%(id)s-%(title)s.%(ext)s",
+        "restrictfilenames": True,
+        "noplaylist": True,
+        "nocheckcertificate": True,
+        "ignoreerrors": False,
+        "logtostderr": False,
+        "quiet": True,
+        "no_warnings": True,
+        "default_search": "auto",
+        "source_address": "0.0.0.0",
+        "extract_flat": True,
+        "playlistend": 20,
+    },
+)
 ytdl = youtube_dl.YoutubeDL(ytdl_format_options)
 audio_queue = deque()  # Stores queued songs
 
@@ -203,7 +236,7 @@ def download_sound(sound_url, sound_name):
         file_path = os.path.join(SOUND_FOLDER, f"{sound_name}.mp3")
 
         # Write the content to the file
-        os.makedirs(os.path.dirname(SOUND_FOLDER), exist_ok=True)
+        SOUND_FOLDER_PATH.mkdir(parents=True, exist_ok=True)
         with open(file_path, 'wb') as file:
             for chunk in response.iter_content(chunk_size=8192):
                 file.write(chunk)
@@ -480,4 +513,7 @@ async def on_ready():
     print(f"Commands found: {x}")
     print(f"Logged in as {bot.user}")
 
-bot.run(TOKEN)
+if TOKEN:
+    bot.run(TOKEN)
+else:
+    print("DISCORD_BOT_TOKEN is not set. Please provide it in your .env file or docker environment.")

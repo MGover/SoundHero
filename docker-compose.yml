@@ -1,0 +1,14 @@
+services:
+  soundhero:
+    build: .
+    env_file:
+      - .env
+    environment:
+      RUNNING_IN_DOCKER: "true"
+      SOUNDHERO_DATA_DIR: /app/data
+    volumes:
+      - soundhero-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  soundhero-data:

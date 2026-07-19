@@ -47,6 +47,16 @@ python sound-hero.py
 
 If you get "Logged in as <BotNameHere> then you got everything right so far
 
+### Docker Compose
+1. Copy [.env.example](.env.example) to .env and fill in your Discord token.
+2. From the project root, run:
+
+```
+docker compose up --build
+```
+
+The container stores the bot database and downloaded sounds in a persistent Docker volume named `soundhero-data`.
+
 ## Commands
 |Command|Description|
 |---------|---------|
