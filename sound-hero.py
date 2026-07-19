@@ -14,6 +14,7 @@ from collections import deque
 from youtubesearchpython import VideosSearch, Suggestions
 from dotenv import load_dotenv  # type: ignore
 from config import parse_env_mapping
+from voice_utils import get_voice_client_for_guild
 
 BASE_DIR = Path(__file__).resolve().parent
 env_path = BASE_DIR / ".env"
@@ -358,11 +359,7 @@ async def on_voice_state_update(member, before, after):
     join_sound = user_sounds[0]
     leave_sound = user_sounds[1]
 
-    if join_sound or leave_sound:
-        voice_channel = after.channel if after.channel else before.channel
-        if not voice_channel:
-            return
-        bot_vc = discord.utils.get(bot.voice_clients, guild=guild)
+    bot_vc = get_voice_client_for_guild(bot, guild)
 
     if (not join_sound and leave_sound) and not user_sounds:
         return
